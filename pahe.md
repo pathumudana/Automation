@@ -1,46 +1,27 @@
+# Lab 1: Installing Git
 
-Connect-AzAccount -Identity
+## Linux
 
-# Get Exchange Online credentials
-$UserCredential = Get-AutomationPSCredential -Name "Automateac"
-Connect-ExchangeOnline -Credential $UserCredential
+Virtually every distribution of Linux includes Git in its repositories. Here are the commands for some of the most common Linux distributions:
 
-# Get the current date and time
-$currentmonth = Get-Date -Format "yyyy-MM"
-$currentTime = Get-Date -Format "HH.mm.ss"
+For Debian and Ubuntu: `sudo apt install git-all` (this _should_ work for the various Ubuntu derivatives like Linux Mint as well)
 
-# Define the date range for the message trace (last 10 days)
-$startDate = (Get-Date).AddDays(-10)
-$endDate = get-date
+For Fedora: `sudo dnf install git-all`
 
-# Run the message trace
-$messages = Get-MessageTrace -StartDate $startDate -EndDate $endDate
+For CentOS: `sudo yum install git-all` (this _should_ also work for RHEL)
 
-# Convert the results to CSV format
-$tempPath = [System.IO.Path]::GetTempPath()
-$csvPath = "$tempPath\message-trace-results_$currentDate_$currentTime.csv"
-$messages | Export-Csv -Path $csvPath -NoTypeInformation
+## macOS
 
-# Azure Storage account details
-$storageAccountName = "your storge account name"
-$storageAccountKey = "your key"
-$containerName = $currentmonth
-$blobName = "message-trace-results_$currentDate_$currentTime.csv"
+The easiest way to install Git on macOS is to install it as part of the XCode Command Line Tools:
 
-# Create a storage context
-$ctx = New-AzStorageContext -StorageAccountName $storageAccountName -StorageAccountKey $storageAccountKey
+1. Navigate to [https://developer.apple.com/downloads/more/](https://developer.apple.com/downloads/more/) and log in with your Apple ID. (Membership is free.)
 
-# Check if the container exists, if not, create it
-$container = Get-AzStorageContainer -Name $containerName -Context $ctx -ErrorAction SilentlyContinue
-if (-not $container) {
-    New-AzStorageContainer -Name $containerName -Context $ctx
-}
+2. Download the latest version of Command Line Tools for your version of macOS (the name of the download usually indicates the macOS version support).
 
-# Upload the CSV file to Azure Blob Storage
-Set-AzStorageBlobContent -Container $containerName -File $csvPath -Blob $blobName -Context $ctx
+3. Install the downloaded package. Git will be available from your terminal after the installation.
 
-# Clean up
-Remove-Item $csvPath
+If you'd prefer not to go this route, a Mac OS X binary installer is available at [https://git-scm.com/download/mac](https://git-scm.com/download/mac).
 
-# Disconnect from Exchange Online
-Disconnect-ExchangeOnline -Confirm:$false
+## Windows
+
+Download the installer executable from [https://git-scm.com/download/win](https://git-scm.com/download/win) to install Git on your Windows-based system.
