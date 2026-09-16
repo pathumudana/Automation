@@ -1,0 +1,143 @@
+<#
+.SYNOPSIS
+    Tags all users under one or more "admin" groups (including groups nested
+    inside a container group) with a directory extension attribute value of
+    "Admin", so they can be excluded from a dynamic group via a normal
+    attribute-based rule.
+    (memberOf can't be combined with other conditions in a dynamic group rule,
+    and it only reads DIRECT members of the group it points at, so this script
+    bridges both gaps by recursively walking nested groups. A directory
+    extension attribute is used instead of onPremisesExtensionAttributes
+    because these users are on-prem synced — onPremisesExtensionAttributes is
+    owned by Entra Connect and isn't reliably writable from the cloud side for
+    synced objects, whereas a directory extension property is cloud-native and
+    writable via Graph regardless of sync status.)
+
+.DESCRIPTION
+    - Starting from the group ID(s) in $AdminGroupIds, recursively walks any
+      nested groups (a "group of groups") to find every user underneath them
+    - Sets the directory extension attribute (e.g.
+      extension_<appid>_isPrivilegedUser) to "Admin" on each of those users
+    - Clears that attribute on any user who is currently tagged "Admin" but is
+      NO LONGER under any of those groups (so removed admins fall back into
+      the "all users" dynamic group automatically)
+    - Intended to run on a schedule (e.g. hourly/daily via Azure Automation,
+      a scheduled task, or a runbook)
+
+.NOTES
+    Requires Microsoft.Graph PowerShell SDK:
+        Install-Module Microsoft.Graph -Scope CurrentUser
+    Requires an app registration / managed identity with at least:
+        User.ReadWrite.All
+        GroupMember.Read.All
+    Requires the directory extension property to already be registered
+    (see the one-time app registration + New-MgApplicationExtensionProperty
+    setup). Set $ExtensionPropertyName below to the EXACT name Graph returned
+    for that property, e.g.
+    extension_e4e6f7f3493648259ab5e2caac27_isPrivilegedUser
+    Adjust $AdminGroupIds as needed.
+    If $AdminGroupIds is just your container group's own ID, leave it as a
+    single-element array — the script discovers its nested groups on its own.
+#>
+
+param(
+    [string[]]$AdminGroupIds = @(
+        "dd43351e-28ae-4a62-ad74-caca77d3c24591",
+        "12240e2e-cb9b-4267-8f46-b3af50e923c4a3"
+    ),
+    [string]$ExtensionPropertyName = "extension_e4e6f7f3493648259ab5e2caac27_isPrivilegedUser",
+    [string]$TagValue = "Admin"
+)
+
+# Connect using an existing managed identity / app context.
+# For LOCAL/interactive testing (opens a browser sign-in prompt):
+#Connect-MgGraph -Scopes "User.ReadWrite.All","GroupMember.Read.All"
+# Once this is running inside Azure Automation with a managed identity
+# assigned and granted the same Graph permissions, swap the line above for:
+ Connect-MgGraph -Identity
+
+# Select-MgProfile is obsolete in current Microsoft.Graph SDK versions
+# (v1.0 is the only profile now) — no longer needed, intentionally omitted.
+
+function Get-AllUsersUnderGroup {
+    <#
+        Recursively walks a group's membership. If a member is a user, it's
+        added to the result set. If a member is itself a group (nested), the
+        function recurses into it. $visited guards against circular nesting.
+    #>
+    param(
+        [string]$GroupId,
+        [System.Collections.Generic.HashSet[string]]$UserIds,
+        [System.Collections.Generic.HashSet[string]]$Visited
+    )
+
+    if ($Visited.Contains($GroupId)) { return }
+    [void]$Visited.Add($GroupId)
+
+    try {
+        $members = Get-MgGroupMember -GroupId $GroupId -All
+    }
+    catch {
+        Write-Warning "Failed to read members of group $GroupId : $_"
+        return
+    }
+
+    foreach ($m in $members) {
+        $odataType = $m.AdditionalProperties["@odata.type"]
+        if ($odataType -eq "#microsoft.graph.user") {
+            [void]$UserIds.Add($m.Id)
+        }
+        elseif ($odataType -eq "#microsoft.graph.group") {
+            Get-AllUsersUnderGroup -GroupId $m.Id -UserIds $UserIds -Visited $Visited
+        }
+    }
+}
+
+Write-Output "Collecting all users under admin group(s), including nested groups..."
+
+$adminUserIds = New-Object System.Collections.Generic.HashSet[string]
+$visitedGroups = New-Object System.Collections.Generic.HashSet[string]
+
+foreach ($groupId in $AdminGroupIds) {
+    Get-AllUsersUnderGroup -GroupId $groupId -UserIds $adminUserIds -Visited $visitedGroups
+}
+
+Write-Output "Groups walked (including nested): $($visitedGroups.Count)"
+Write-Output "Total unique admin users found: $($adminUserIds.Count)"
+
+# --- Tag current admins ---
+# Directory extension properties aren't first-class cmdlet parameters, so
+# they're written via -AdditionalProperties, keyed by the exact property
+# name Graph returned when it was registered.
+foreach ($userId in $adminUserIds) {
+    try {
+        Update-MgUser -UserId $userId -AdditionalProperties @{ $ExtensionPropertyName = $TagValue }
+        Write-Output "Tagged user $userId as $TagValue"
+    }
+    catch {
+        Write-Warning "Failed to tag user $userId : $_"
+    }
+}
+
+# --- Untag users who are tagged but no longer in either admin group ---
+Write-Output "Checking for stale tags to remove..."
+
+# $filter on directory extension properties needs the property name quoted
+# exactly as registered; -CountVariable/-ConsistencyLevel eventual are
+# required for advanced queries against extension properties in v1.0.
+$filter = "$ExtensionPropertyName eq '$TagValue'"
+$taggedUsers = Get-MgUser -Filter $filter -All -Property "Id,$ExtensionPropertyName" -ConsistencyLevel eventual -CountVariable taggedCount
+
+foreach ($user in $taggedUsers) {
+    if (-not $adminUserIds.Contains($user.Id)) {
+        try {
+            Update-MgUser -UserId $user.Id -AdditionalProperties @{ $ExtensionPropertyName = $null }
+            Write-Output "Removed stale tag from user $($user.Id)"
+        }
+        catch {
+            Write-Warning "Failed to clear tag on user $($user.Id) : $_"
+        }
+    }
+}
+
+Write-Output "Done."
